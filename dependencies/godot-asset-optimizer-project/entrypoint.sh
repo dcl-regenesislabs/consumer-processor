@@ -8,6 +8,7 @@ sleep 1
 
 # Start asset-server in background
 cd /app
+RUST_LOG=warn,dclgodot::content::resource_provider=debug,dclgodot::asset_server=info \
 ./decentraland.godot.client.x86_64 --headless --asset-server --asset-server-port ${ASSET_SERVER_PORT:-8080} &
 GODOT_PID=$!
 

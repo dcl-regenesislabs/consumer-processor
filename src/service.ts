@@ -1,10 +1,12 @@
 import { IConfigComponent, Lifecycle } from '@well-known-components/interfaces'
 import { setupRouter } from './controllers/routes'
-import { godotOptimizer } from './runners/godot-optimizer'
+import { godotOptimizer, ProcessReport } from './runners/godot-optimizer'
 import { godotGenerateSceneImages } from './runners/minimap-generator/godot-generate-scene-images'
 import { AppComponents, GlobalContext, TestComponents } from './types'
 import { generateCrdt } from './runners/crdt-runner'
 import { generateImposter } from './runners/imposter-runner'
+import { DeploymentToSqs } from '@dcl/schemas/dist/misc/deployments-to-sqs'
+import type { IFetchComponent } from '@well-known-components/http-server'
 
 export const validProcessMethods = [
   'log',
@@ -21,6 +23,74 @@ export async function getProcessMethod(config: IConfigComponent): Promise<Proces
     throw new Error(`Unknown process method: ${processMethod}`)
   }
   return processMethod as ProcessMethod
+}
+
+type EntityType = 'scene' | 'wearable' | 'emote'
+
+async function fetchThumbnailUrl(
+  fetch: IFetchComponent,
+  job: DeploymentToSqs,
+  entityType: EntityType
+): Promise<string | undefined> {
+  try {
+    const entityId = job.entity.entityId
+    const contentServerUrl =
+      job.contentServerUrls && job.contentServerUrls.length > 0
+        ? job.contentServerUrls[0]
+        : 'https://peer.decentraland.org/content'
+
+    // Fetch entity metadata
+    const response = await fetch.fetch(`${contentServerUrl}/entities/active`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids: [entityId] })
+    })
+
+    if (!response.ok) {
+      await response.text().catch(() => {})
+      return undefined
+    }
+
+    const entities = (await response.json()) as Array<{
+      id: string
+      content: Array<{ file: string; hash: string }>
+      metadata?: {
+        display?: { navmapThumbnail?: string }
+        thumbnail?: string
+      }
+    }>
+
+    if (!entities || entities.length === 0) {
+      return undefined
+    }
+
+    const entity = entities[0]
+    let thumbnailFile: string | undefined
+
+    // Get thumbnail file path based on entity type
+    if (entityType === 'scene') {
+      thumbnailFile = entity.metadata?.display?.navmapThumbnail
+    } else {
+      thumbnailFile = entity.metadata?.thumbnail
+    }
+
+    if (!thumbnailFile) {
+      return undefined
+    }
+
+    // Find the hash for the thumbnail file
+    const thumbnailContent = entity.content.find((c) => c.file.toLowerCase() === thumbnailFile?.toLowerCase())
+
+    if (!thumbnailContent) {
+      return undefined
+    }
+
+    // Return the full URL to the thumbnail
+    return `${contentServerUrl}/contents/${thumbnailContent.hash}`
+  } catch {
+    // Non-blocking - return undefined on any error
+    return undefined
+  }
 }
 
 // this function wires the business logic (adapters & controllers) with the components (ports)
@@ -70,10 +140,12 @@ export async function main(program: Lifecycle.EntryPointParameters<AppComponents
           entityType
         })
 
+        let processReport: ProcessReport | null = null
+
         try {
           switch (processMethod) {
             case 'godot_optimizer':
-              await godotOptimizer(job, message, globalContext.components)
+              processReport = await godotOptimizer(job, message, globalContext.components)
               break
             case 'godot_minimap':
               await godotGenerateSceneImages(globalContext.components, job, message)
@@ -89,6 +161,9 @@ export async function main(program: Lifecycle.EntryPointParameters<AppComponents
               break
           }
 
+          // Fetch thumbnail URL for the report (non-blocking)
+          const thumbnailUrl = await fetchThumbnailUrl(components.fetch, job, entityType as EntityType)
+
           // Report job success
           components.monitoringReporter.reportJobComplete({
             sceneId,
@@ -97,11 +172,22 @@ export async function main(program: Lifecycle.EntryPointParameters<AppComponents
             completedAt: new Date().toISOString(),
             durationMs: Date.now() - startTime,
             isPriority,
-            entityType
+            entityType,
+            thumbnailUrl,
+            reportJson: processReport || undefined
           })
         } catch (error) {
           logger.error(`Error processing job ${job.entity.entityId}`)
           logger.error(error as any)
+
+          // Extract report from error if available (godot-optimizer attaches it)
+          const errorWithReport = error as Error & { report?: ProcessReport }
+          if (errorWithReport.report) {
+            processReport = errorWithReport.report
+          }
+
+          // Fetch thumbnail URL for the report (non-blocking)
+          const thumbnailUrl = await fetchThumbnailUrl(components.fetch, job, entityType as EntityType)
 
           // Report job failure
           components.monitoringReporter.reportJobComplete({
@@ -112,7 +198,9 @@ export async function main(program: Lifecycle.EntryPointParameters<AppComponents
             durationMs: Date.now() - startTime,
             errorMessage: error instanceof Error ? error.message : 'Unknown error',
             isPriority,
-            entityType
+            entityType,
+            thumbnailUrl,
+            reportJson: processReport || undefined
           })
         }
       })

@@ -5,6 +5,7 @@ import { TaskQueueMessage } from '../../adapters/sqs'
 import { AppComponents } from '../../types'
 import { AssetType } from '../../adapters/asset-server'
 import AdmZip from 'adm-zip'
+import { preloadEntityContent } from './content-preloader'
 
 // Extended type that includes entityType and profile data from the producer
 type DeploymentWithType = DeploymentToSqs & {
@@ -21,7 +22,7 @@ type DeploymentWithType = DeploymentToSqs & {
 
 type EntityType = 'scene' | 'wearable' | 'emote'
 
-type ProcessReport = {
+export type ProcessReport = {
   entityId: string
   entityType: EntityType
   contentServerUrl: string
@@ -54,7 +55,7 @@ export async function godotOptimizer(
   entity: DeploymentToSqs,
   _msg: TaskQueueMessage,
   components: Pick<AppComponents, 'logs' | 'config' | 'storage' | 'assetServer' | 'fetch'>
-): Promise<void> {
+): Promise<ProcessReport | null> {
   const { logs, assetServer, storage } = components
   const logger = logs.getLogger('godot-optimizer')
 
@@ -103,6 +104,20 @@ export async function godotOptimizer(
     })
     await assetServer.restartGodot()
   }
+
+  // Throw error if processing failed so service.ts reports correct status
+  // But first, save the report reference so it can be returned
+  const finalReport = report
+  if (finalReport && finalReport.result && !finalReport.result.success) {
+    const errorMsg = finalReport.errors.length > 0 ? finalReport.errors.join('; ') : 'Processing failed'
+    // Store report in a way that service.ts can access it even on error
+    // We'll throw but also return the report via a custom error
+    const error = new Error(errorMsg) as Error & { report?: ProcessReport }
+    error.report = finalReport
+    throw error
+  }
+
+  return finalReport
 }
 
 /**
@@ -140,6 +155,22 @@ async function processScene(
     await fs.mkdir(tempDir, { recursive: true })
   } catch {
     // Ignore if already exists
+  }
+
+  // Pre-download content to Godot cache
+  try {
+    logger.info('Pre-downloading scene content', { entityId })
+    const preloadResult = await preloadEntityContent(entityId, contentServerUrl, components)
+    logger.info('Pre-download complete', {
+      entityId,
+      downloaded: preloadResult.downloaded,
+      failed: preloadResult.failed
+    })
+  } catch (preloadError) {
+    logger.warn('Content pre-download failed, continuing with processing', {
+      entityId,
+      error: preloadError instanceof Error ? preloadError.message : String(preloadError)
+    })
   }
 
   try {
@@ -485,6 +516,26 @@ async function processWearableOrEmote(
         entityId,
         entityType,
         gltfs: gltfFiles.length
+      })
+    }
+
+    // Pre-download content to Godot cache
+    try {
+      logger.info('Pre-downloading entity content', { entityId, entityType })
+      const contentList = Object.entries(contentMapping).map(([file, hash]) => ({ file, hash }))
+      const preloadResult = await preloadEntityContent(entityId, contentServerUrl, components, {
+        contentMapping: contentList
+      })
+      logger.info('Pre-download complete', {
+        entityId,
+        entityType,
+        downloaded: preloadResult.downloaded,
+        failed: preloadResult.failed
+      })
+    } catch (preloadError) {
+      logger.warn('Content pre-download failed, continuing with processing', {
+        entityId,
+        error: preloadError instanceof Error ? preloadError.message : String(preloadError)
       })
     }
 

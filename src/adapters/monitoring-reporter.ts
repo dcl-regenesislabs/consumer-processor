@@ -27,6 +27,8 @@ export interface JobCompleteData {
   errorMessage?: string
   isPriority?: boolean
   entityType?: 'scene' | 'wearable' | 'emote'
+  thumbnailUrl?: string
+  reportJson?: object // Full processing report to store in DB (avoids CDN cache)
 }
 
 interface MonitoringReporterComponents {
