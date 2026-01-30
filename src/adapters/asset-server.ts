@@ -22,7 +22,6 @@ export type ProcessSceneParams = {
   sceneHash: string
   contentBaseUrl: string
   outputHash?: string
-  packHashes?: string[]
 }
 
 export type ProcessSceneResponse = {
@@ -30,7 +29,7 @@ export type ProcessSceneResponse = {
   output_hash: string
   scene_hash: string
   total_assets: number
-  pack_assets: number
+  jobs: Array<{ job_id: string; hash: string; status: string }>
 }
 
 export type AssetRequest = {
@@ -65,6 +64,7 @@ export type BatchStatus = {
   zip_path?: string
   error?: string
   jobs: JobStatus[]
+  individual_zips?: Array<{ hash: string; zip_path: string }>
 }
 
 export type JobStatus = {
@@ -123,12 +123,11 @@ export function createAssetServerComponent(
   }
 
   async function processScene(params: ProcessSceneParams): Promise<ProcessSceneResponse> {
-    const body = {
+    const body: Record<string, unknown> = {
       scene_hash: params.sceneHash,
       content_base_url: params.contentBaseUrl,
-      output_hash: params.outputHash,
-      pack_hashes: params.packHashes
     }
+    if (params.outputHash) body.output_hash = params.outputHash
 
     logger.info('Submitting scene for processing', { sceneHash: params.sceneHash, baseUrl })
 
