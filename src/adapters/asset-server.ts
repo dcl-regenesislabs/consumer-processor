@@ -236,8 +236,14 @@ export function createAssetServerComponent(
       clearGodotLogs()
       addGodotLog(`[${new Date().toISOString()}] Starting Godot asset-server...`)
 
-      // Start new Godot process in background
-      const godotCmd = `/app/decentraland.godot.client.x86_64 --headless --asset-server --asset-server-port ${port}`
+      // Start new Godot process in background.
+      // NO --headless: that wires up the dummy RenderingServer, so the
+      // impostor-bake SubViewport readback returns null pixels and every
+      // octahedral atlas comes back as `fail_blank_albedo` in
+      // [impostor-bake] requested=N baked=0. We need opengl3 + Xvfb (set
+      // up in the container entrypoint with Mesa llvmpipe) so SubViewport
+      // actually rasterizes.
+      const godotCmd = `/app/decentraland.godot.client.x86_64 --rendering-driver opengl3 --audio-driver Dummy --asset-server --asset-server-port ${port}`
       const child = exec(godotCmd)
 
       // Capture stdout
